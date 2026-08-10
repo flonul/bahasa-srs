@@ -54,13 +54,7 @@ function Badge({ type }: { type: string }) {
       borderRadius:99, fontSize:12, fontWeight:500 }}>{m.label}</span>
   );
 }
-function SrsChip({ stage }: { stage: number }) {
-  const s = SRS[stage] ?? SRS[0];
-  return (
-    <span style={{ background:s.bg, color:s.color, padding:"2px 10px",
-      borderRadius:99, fontSize:12, fontWeight:500 }}>{s.name}</span>
-  );
-}
+
 function Bar({ value, total, color="#3b82f6" }: { value:number; total:number; color?:string }) {
   return (
     <div style={{ height:6, background:"#e5e7eb", borderRadius:99, overflow:"hidden" }}>
