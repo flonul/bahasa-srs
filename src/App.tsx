@@ -17,18 +17,6 @@ type UItem = {
 };
 type QResult = { item_id: number; correct: boolean };
 
-// ─── SRS ─────────────────────────────────────────────────────────────────────
-const SRS = [
-  { name:"Apprentice 1", hours:4,       color:"#e06b8b", bg:"#fde8ef" },
-  { name:"Apprentice 2", hours:8,       color:"#e06b8b", bg:"#fde8ef" },
-  { name:"Apprentice 3", hours:24,      color:"#e06b8b", bg:"#fde8ef" },
-  { name:"Apprentice 4", hours:48,      color:"#e06b8b", bg:"#fde8ef" },
-  { name:"Guru 1",       hours:168,     color:"#9b59b6", bg:"#f0e6f6" },
-  { name:"Guru 2",       hours:336,     color:"#9b59b6", bg:"#f0e6f6" },
-  { name:"Master",       hours:720,     color:"#3b82f6", bg:"#e0ecff" },
-  { name:"Enlightened",  hours:2880,    color:"#0ea5e9", bg:"#e0f5ff" },
-  { name:"Burned",       hours:Infinity,color:"#374151", bg:"#f3f4f6" },
-];
 
 // ─── STYLE HELPERS ────────────────────────────────────────────────────────────
 const card: React.CSSProperties = {
