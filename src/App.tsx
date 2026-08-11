@@ -367,7 +367,7 @@ function LessonView({ items, onComplete }:{ items:Item[]; onComplete:(r:QResult[
       setQueue(q=>[...q,...missing]);
       return <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh" }}>🌀</div>;
     }
-    onComplete(batch.map(item=>({ item_id:item.id, correct:true })));
+    onComplete(results);
     return null;
   }
 
