@@ -519,7 +519,7 @@ function LevelDetail({ level, items, uItems, onBack, dark }:{
                   <span style={{ fontWeight:800, fontSize:17, color:isNew?sc:tc }}>{item.word}</span>
                   <span style={{ color:sc, fontSize:13, marginLeft:10 }}>/{item.reading}/</span>
                 </div>
-                <Badge type={item.type} dark={dark}/>
+                <Badge type={item.type} />
               </div>
               <div style={{ color:isNew?sc:(dark?"#cbd5e1":"#374151"), fontSize:15, marginBottom:learned?8:0 }}>
                 {isNew?"———":item.meaning}
