@@ -60,7 +60,7 @@ const btn = (bg:string, disabled=false, dark=false): React.CSSProperties => ({
   width:"100%", fontFamily:"inherit", transition:"background .2s",
 });
 
-function Badge({ type, dark=false }:{ type:string; dark?:boolean }) {
+function Badge({ type }:{ type:string }) {
   const m = TYPE_META[type]??TYPE_META.vocab;
   return <span style={{ background:m.bg, color:m.text, padding:"2px 10px", borderRadius:99, fontSize:12, fontWeight:600 }}>{m.label}</span>;
 }
@@ -82,79 +82,6 @@ function checkAnswer(input:string, item:Item, dir:Direction): boolean {
   return ans===item.word.toLowerCase()||(ans.length>2&&item.word.toLowerCase().includes(ans));
 }
 
-// ─── WEEKLY STREAK ────────────────────────────────────────────────────────────
-function WeeklyStreak({ heatmap, streak, prefs, logs, dark }:{
-  heatmap:HeatDay[]; streak:number; prefs:UserPrefs; logs:SessionLog[]; dark:boolean;
-}) {
-  const tc = dark?"#f1f5f9":"#1f2937";
-  const sc = dark?"#94a3b8":"#6b7280";
-  const DAY = ["D","L","M","M","J","V","S"];
-
-  const dataMap: Record<string,number> = {};
-  heatmap.forEach(d=>{ dataMap[d.day]=d.items_done; });
-
-  const days7 = Array.from({length:7},(_,i)=>{
-    const d=new Date(); d.setDate(d.getDate()-6+i); return d;
-  });
-  const today = new Date().toISOString().split("T")[0];
-
-  return (
-    <div style={{ ...card(dark), padding:"14px 20px" }}>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
-        <div style={{ fontSize:13, fontWeight:700, color:tc }}>Cette semaine</div>
-        <div style={{ display:"flex", alignItems:"center", gap:4 }}>
-          <span style={{ fontSize:16 }}>🔥</span>
-          <span style={{ fontSize:16, fontWeight:800, color:"#f59e0b" }}>{streak}</span>
-          <span style={{ fontSize:12, color:sc }}>j. de streak</span>
-        </div>
-      </div>
-
-      <div style={{ display:"flex", gap:6 }}>
-        {days7.map((day,i)=>{
-          const key = day.toISOString().split("T")[0];
-          const items = dataMap[key]??0;
-          const isToday = key===today;
-          const isFuture = key>today;
-          const goalMet = items>=prefs.daily_goal;
-          const partial = items>0&&!goalMet;
-
-          let bg: string;
-          if (isFuture)      bg = dark?"#1e293b":"#f9fafb";
-          else if (goalMet)  bg = "#16a34a";
-          else if (partial)  bg = "#f59e0b";
-          else               bg = dark?"#2d3748":"#f3f4f6";
-
-          return (
-            <div key={i} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4 }}>
-              <div style={{ fontSize:10, fontWeight:600, color:isToday?tc:sc }}>{DAY[day.getDay()]}</div>
-              <div style={{ width:"100%", height:36, borderRadius:8, background:bg,
-                border:`2px solid ${isToday?"#3b82f6":bg}`,
-                display:"flex", alignItems:"center", justifyContent:"center",
-                fontSize:11, fontWeight:700,
-                color:goalMet||partial?"#fff":(dark?"#475569":"#d1d5db"),
-                transition:"all .2s" }}>
-                {!isFuture&&items>0?items:""}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div style={{ display:"flex", gap:12, marginTop:10, justifyContent:"flex-end" }}>
-        {[
-          { color:"#16a34a", label:"Objectif ✓" },
-          { color:"#f59e0b", label:"Partiel" },
-          { color:dark?"#2d3748":"#f3f4f6", label:"Inactif" },
-        ].map(({color,label})=>(
-          <div key={label} style={{ display:"flex", alignItems:"center", gap:4, fontSize:10, color:sc }}>
-            <div style={{ width:8, height:8, borderRadius:2, background:color }}/>
-            {label}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 function Heatmap({ data, streak, dark }:{ data:HeatDay[]; streak:number; dark:boolean }) {
   const dataMap: Record<string,number> = {};
   data.forEach(d=>{ dataMap[d.day]=d.items_done; });
