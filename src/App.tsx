@@ -367,6 +367,7 @@ function LessonView({ items, onComplete }:{ items:Item[]; onComplete:(r:QResult[
       setQueue(q=>[...q,...missing]);
       return <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh" }}>🌀</div>;
     }
+    console.log("results envoyés:", results);
     onComplete(results);
     return null;
   }
@@ -519,11 +520,21 @@ export default function App() {
   async function applyResults(results:QResult[]) {
     if (!user || !results.length) { setView("dashboard"); return; }
     setSaving(true);
+    const byItem: Record<number, boolean> = {};
+    results.forEach(({ item_id, correct }) => {
+      if (byItem[item_id] === undefined) byItem[item_id] = correct;
+      else byItem[item_id] = byItem[item_id] && correct;
+    });
+    const deduped = Object.entries(byItem).map(([id, correct]) => ({
+      item_id: Number(id), correct,
+    }));
+    console.log("deduped envoyé:", JSON.stringify(deduped));
     await supabase.rpc("apply_review_results",{
-      p_user_id:user.id, p_results:JSON.stringify(results),
+      p_user_id:user.id, p_results:deduped,
     });
     await loadData(user.id);
-    setSaving(false); setView("dashboard");
+    setSaving(false);
+    setView("dashboard");
   }
 
   async function logout() { await supabase.auth.signOut(); setItems([]); setUItems([]); }
