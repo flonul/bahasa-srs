@@ -6,10 +6,10 @@ const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 const supabase     = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 type Item      = { id:number; level:number; type:string; word:string; reading:string; meaning:string; alt:string[]; hint:string; };
-type UItem     = { item_id:number; stage:number; next_review:string; correct_count:number; wrong_count:number; learned:boolean; };
+type UItem     = { item_id:number; stage:number; next_review:string; correct_count:number; wrong_count:number; learned:boolean; last_wrong_at:string|null; };
 type QResult   = { item_id:number; correct:boolean };
 type Direction = "id_fr"|"fr_id";
-type View      = "dashboard"|"lesson"|"review"|"level_detail"|"profile"|"admin";
+type View      = "dashboard"|"lesson"|"review"|"review_errors"|"level_detail"|"profile"|"admin";
 type SessionLog= { session_type:string; item_count:number; correct:number; wrong:number; created_at:string; };
 type HeatDay   = { day:string; items_done:number };
 type UserPrefs = { fr_id_enabled:boolean; daily_goal:number };
@@ -862,15 +862,17 @@ function AdminPage({ onBack, dark, userId }:{ onBack:()=>void; dark:boolean; use
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson, onReview, onLogout, onLevelClick, onProfile, onAdmin, onToggleDark }:{
+function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson, onReview, onErrors, onLogout, onLevelClick, onProfile, onAdmin, onToggleDark }:{
   items:Item[]; uItems:UItem[]; logs:SessionLog[]; heatmap:HeatDay[]; streak:number;
   prefs:UserPrefs; dark:boolean;
-  onLesson:()=>void; onReview:()=>void; onLogout:()=>void;
+  onLesson:()=>void; onReview:()=>void; onErrors:()=>void; onLogout:()=>void;
   onLevelClick:(lv:number)=>void; onProfile:()=>void; onAdmin:()=>void; onToggleDark:()=>void;
 }) {
   const now=new Date().toISOString();
   const dueCount=uItems.filter(u=>u.learned&&u.next_review<=now&&u.stage<10).length;
   const lessonCount=items.filter(i=>!uItems.find(u=>u.item_id===i.id)?.learned).length;
+  const errorCutoff=new Date(Date.now()-24*3600*1000).toISOString();
+  const errorCount=uItems.filter(u=>u.learned&&u.last_wrong_at&&u.last_wrong_at>=errorCutoff).length;
   const learned=uItems.filter(u=>u.learned);
   const levels=Array.from(new Set(items.map(i=>i.level))).sort((a,b)=>a-b);
   const palierCounts=PALIERS.map(p=>({...p,count:uItems.filter(u=>p.stages.includes(u.stage)&&u.learned).length}));
@@ -919,6 +921,11 @@ function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson
         <button onClick={onReview} disabled={dueCount===0} style={{ ...btn("#3b82f6",dueCount===0,dark), flex:1 }}>
           🔁 Révisions ({dueCount})
         </button>
+        {errorCount>0&&(
+          <button onClick={onErrors} style={{ ...btn("#f97316",false,dark), flex:1 }}>
+            🔥 Erreurs récentes ({errorCount})
+          </button>
+        )}
       </div>
 
       {/* Objectif journalier */}
@@ -1262,8 +1269,8 @@ function LessonView({ items, prefs, onComplete, dark }:{
 }
 
 // ─── REVIEW VIEW ──────────────────────────────────────────────────────────────
-function ReviewView({ dueItems, items, prefs, onComplete, dark }:{
-  dueItems:UItem[]; items:Item[]; prefs:UserPrefs; onComplete:(r:QResult[])=>void; dark:boolean;
+function ReviewView({ dueItems, items, prefs, onComplete, dark, title }:{
+  dueItems:UItem[]; items:Item[]; prefs:UserPrefs; onComplete:(r:QResult[])=>void; dark:boolean; title?:string;
 }) {
   const [queue, setQueue]=useState<{item:Item;dir:Direction}[]>(()=>
     dueItems.map(u=>items.find(i=>i.id===u.item_id)).filter(Boolean)
@@ -1302,6 +1309,7 @@ function ReviewView({ dueItems, items, prefs, onComplete, dark }:{
     return (
       <div style={{ maxWidth:520, margin:"0 auto", padding:"60px 16px", textAlign:"center" }}>
         <div style={{ fontSize:64 }}>{pct>=80?"🎉":pct>=50?"💪":"😅"}</div>
+        {title&&<div style={{ fontSize:13, fontWeight:700, color:"#f97316", marginBottom:6 }}>{title}</div>}
         <div style={{ fontSize:26, fontWeight:800, margin:"16px 0 8px", color:dark?"#f1f5f9":"#1f2937" }}>Session terminée !</div>
         <div style={{ color:dark?"#94a3b8":"#6b7280", fontSize:16 }}>{correct}/{results.length} correctes ({pct}%)</div>
         <div style={{ marginTop:24, ...card(dark), padding:"20px", textAlign:"left" }}>
@@ -1327,14 +1335,18 @@ function ReviewView({ dueItems, items, prefs, onComplete, dark }:{
 
   const {item,dir}=queue[qIdx];
   return (
-    <QuizCard item={item} dir={dir} questionNum={qIdx+1} totalQuestions={queue.length}
-      showHintBtn={true} dark={dark}
-      onQuit={()=>onComplete(results)}
-      onResult={correct=>{
-        setResults(r=>[...r,{item_id:item.id,correct}]);
-        if (correct) { setAnswered(s=>new Set([...s,`${item.id}_${dir}`])); setQIdx(i=>i+1); }
-        else { setQueue(q=>[...q,{item,dir}]); setQIdx(i=>i+1); }
-      }}/>
+    <>
+      {title&&<div style={{ maxWidth:560, margin:"10px auto 0", padding:"0 14px",
+        textAlign:"center", fontSize:13, fontWeight:700, color:"#f97316" }}>{title}</div>}
+      <QuizCard item={item} dir={dir} questionNum={qIdx+1} totalQuestions={queue.length}
+        showHintBtn={true} dark={dark}
+        onQuit={()=>onComplete(results)}
+        onResult={correct=>{
+          setResults(r=>[...r,{item_id:item.id,correct}]);
+          if (correct) { setAnswered(s=>new Set([...s,`${item.id}_${dir}`])); setQIdx(i=>i+1); }
+          else { setQueue(q=>[...q,{item,dir}]); setQIdx(i=>i+1); }
+        }}/>
+    </>
   );
 }
 
@@ -1495,6 +1507,8 @@ export default function App() {
   const now=new Date().toISOString();
   const dueItems=uItems.filter(u=>u.learned&&u.next_review<=now&&u.stage<10);
   const lessonItems=items.filter(i=>!uItems.find(u=>u.item_id===i.id)?.learned);
+  const errorCutoff=new Date(Date.now()-24*3600*1000).toISOString();
+  const errorItems=uItems.filter(u=>u.learned&&u.last_wrong_at&&u.last_wrong_at>=errorCutoff);
 
   if (view==="level_detail"&&selectedLevel!==null)
     return <LevelDetail level={selectedLevel} items={items} uItems={uItems} onBack={()=>setView("dashboard")} dark={dark}/>;
@@ -1506,11 +1520,13 @@ export default function App() {
     return <LessonView items={lessonItems} prefs={prefs} onComplete={async r=>{ if(!r.length){setView("dashboard");return;} await applyResults(r,"lesson"); }} dark={dark}/>;
   if (view==="review")
     return <ReviewView dueItems={dueItems} items={items} prefs={prefs} onComplete={r=>applyResults(r,"review")} dark={dark}/>;
+  if (view==="review_errors")
+    return <ReviewView dueItems={errorItems} items={items} prefs={prefs} onComplete={r=>applyResults(r,"review")} dark={dark} title="🔥 Erreurs récentes"/>;
 
   return (
     <Dashboard items={items} uItems={uItems} logs={logs} heatmap={heatmap} streak={streak}
       prefs={prefs} dark={dark}
-      onLesson={()=>setView("lesson")} onReview={()=>setView("review")}
+      onLesson={()=>setView("lesson")} onReview={()=>setView("review")} onErrors={()=>setView("review_errors")}
       onLogout={logout} onLevelClick={lv=>{setSelectedLevel(lv);setView("level_detail");}}
       onProfile={()=>setView("profile")} onAdmin={()=>setView("admin")}
       onToggleDark={()=>setDark(d=>!d)}/>
