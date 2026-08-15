@@ -212,15 +212,20 @@ function ReviewSchedule({ uItems, dark }:{ uItems:UItem[]; dark:boolean }) {
     const day=days[dayIdx];
     const start=new Date(day); start.setHours(0,0,0,0);
     const end=new Date(day);   end.setHours(23,59,59,999);
-    const dayItems=uItems.filter(u=>{
-      if (!u.learned||u.stage===10) return false;
-      const nr=new Date(u.next_review);
-      return nr>=start&&nr<=end;
-    });
     const byHour:Record<number,number>={};
-    dayItems.forEach(u=>{
+    uItems.forEach(u=>{
+      if (!u.learned||u.stage===10) return;
       const nr=new Date(u.next_review);
-      const h=nr.getMinutes()>=30?nr.getHours()+1:nr.getHours();
+      // Arrondi à l'heure pleine la plus proche en manipulant un Date complet
+      // (et non un simple nombre d'heures) : setHours() gère nativement le
+      // débordement de minuit et fait automatiquement passer au jour suivant.
+      const rounded=new Date(nr);
+      if (rounded.getMinutes()>=30) rounded.setHours(rounded.getHours()+1);
+      rounded.setMinutes(0,0,0);
+      // L'arrondi peut faire glisser l'item sur le jour suivant (ex: 23h45 → 00h00 J+1).
+      // Dans ce cas, il n'appartient plus au détail horaire de CE jour-ci.
+      if (rounded<start||rounded>end) return;
+      const h=rounded.getHours();
       byHour[h]=(byHour[h]||0)+1;
     });
     return Object.entries(byHour).map(([h,n])=>({hour:Number(h),count:n})).sort((a,b)=>a.hour-b.hour);
