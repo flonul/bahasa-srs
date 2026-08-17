@@ -1120,12 +1120,12 @@ function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson
   return (
     <div style={{ maxWidth:1100, margin:"0 auto", padding:"32px 32px 80px" }}>
       {/* Header */}
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:32 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:32, flexWrap:"wrap", gap:14 }}>
         <div>
           <div style={{ fontSize:30, fontWeight:800, letterSpacing:"-0.5px", color:tc }}>🇮🇩 Bahasa SRS</div>
           <div style={{ color:sc, fontSize:15, marginTop:4 }}>{items.length} items · {levels.length} niveaux</div>
         </div>
-        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+        <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
           <button onClick={onToggleDark} style={{ background:"none", border:`1.5px solid ${dark?"#334155":"#e5e7eb"}`,
             borderRadius:10, padding:"8px 14px", fontSize:18, cursor:"pointer" }}>
             {dark?"☀️":"🌙"}
@@ -1175,17 +1175,17 @@ function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson
       </div>
 
       {/* Ligne 1 : Progression + Planning */}
-      <div style={{ display:"flex", gap:20, marginBottom:20, alignItems:"flex-start" }}>
-        <div style={{ flex:2, display:"flex", flexDirection:"column", gap:20 }}>
+      <div style={{ display:"flex", gap:20, marginBottom:20, alignItems:"flex-start", flexWrap:"wrap" }}>
+        <div style={{ flex:"2 1 320px", display:"flex", flexDirection:"column", gap:20 }}>
           <div style={{ ...card(dark), padding:"24px 28px" }}>
             <div style={{ display:"flex", justifyContent:"space-between", marginBottom:12 }}>
               <span style={{ fontWeight:700, fontSize:17, color:tc }}>Progression globale</span>
               <span style={{ color:sc, fontSize:15 }}>{learned.length}/{items.length}</span>
             </div>
             <Bar value={learned.length} total={items.length} color="#e06b8b" height={10}/>
-            <div style={{ display:"flex", gap:10, marginTop:24 }}>
+            <div style={{ display:"flex", gap:10, marginTop:24, flexWrap:"wrap" }}>
               {palierCounts.map(({l,icon,c,count})=>(
-                <div key={l} style={{ flex:1, background:dark?"#0f172a":"#f9fafb",
+                <div key={l} style={{ flex:"1 1 70px", background:dark?"#0f172a":"#f9fafb",
                   border:`1px solid ${dark?"#334155":"#e5e7eb"}`, padding:"16px 8px", textAlign:"center", borderRadius:14 }}>
                   <div style={{ fontSize:28, marginBottom:6 }}>{icon}</div>
                   <div style={{ fontSize:28, fontWeight:800, color:c }}>{count}</div>
@@ -1227,7 +1227,7 @@ function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson
             </div>
           </div>
         </div>
-        <div style={{ flex:1, minWidth:260 }}>
+        <div style={{ flex:"1 1 260px" }}>
           <ReviewSchedule uItems={uItems} dark={dark}/>
         </div>
       </div>
