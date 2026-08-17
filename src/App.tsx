@@ -28,6 +28,20 @@ const SRS_STAGES = [
   { name:"Natif",      icon:"🌴", color:"#374151", bg:"#f3f4f6", hours:Infinity },
 ];
 
+// Calcule le nouveau stage SRS après une réponse, même logique que apply_review_results() côté SQL :
+// bonne réponse -> stage+1 (max 10) ; mauvaise réponse -> stage-2 si stage>=4, sinon stage-1 (min 0)
+function calcNewStage(currentStage:number, correct:boolean): number {
+  if (correct) return Math.min(currentStage+1, 10);
+  return Math.max(0, currentStage-(currentStage>=4?2:1));
+}
+
+// Un niveau est "terminé" quand tous ses items sont appris (learned)
+function isLevelComplete(level:number, items:Item[], uItems:UItem[]): boolean {
+  const lvItems=items.filter(i=>i.level===level);
+  if (!lvItems.length) return false;
+  return lvItems.every(i=>uItems.find(u=>u.item_id===i.id)?.learned);
+}
+
 const PALIERS = [
   { l:"Touriste",  icon:"🧳", c:"#e06b8b", stages:[0,1,2,3] },
   { l:"Voyageur",  icon:"🗺️", c:"#9b59b6", stages:[4,5]     },
@@ -73,13 +87,55 @@ function Bar({ value, total, color="#3b82f6", height=8 }:{ value:number; total:n
   );
 }
 
+function normalize(s:string): string {
+  return s.trim().toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // supprime les accents
+    .replace(/œ/g,"oe").replace(/æ/g,"ae")            // ligatures
+    .replace(/['']/g,"'");                             // apostrophes
+}
+
 function checkAnswer(input:string, item:Item, dir:Direction): boolean {
-  const ans = input.trim().toLowerCase();
+  const ans = normalize(input);
   if (dir==="id_fr") {
-    const acc = [item.meaning,...(item.alt??[])].map(s=>s.toLowerCase());
+    const acc = [item.meaning,...(item.alt??[])].map(normalize);
     return acc.some(a=>ans===a||a.split(" / ").includes(ans)||(ans.length>3&&a.includes(ans)));
   }
-  return ans===item.word.toLowerCase()||(ans.length>2&&item.word.toLowerCase().includes(ans));
+  return ans===normalize(item.word)||(ans.length>2&&normalize(item.word).includes(ans));
+}
+
+// Distance de Levenshtein (nombre minimal d'ajout/suppression/substitution de caractères)
+function levenshtein(a:string, b:string): number {
+  const m=a.length, n=b.length;
+  if (m===0) return n;
+  if (n===0) return m;
+  const dp:number[]=Array(n+1);
+  for (let j=0;j<=n;j++) dp[j]=j;
+  for (let i=1;i<=m;i++) {
+    let prev=dp[0];
+    dp[0]=i;
+    for (let j=1;j<=n;j++) {
+      const tmp=dp[j];
+      dp[j]=a[i-1]===b[j-1]?prev:1+Math.min(prev,dp[j],dp[j-1]);
+      prev=tmp;
+    }
+  }
+  return dp[n];
+}
+
+// Distance la plus courte entre la réponse tapée et l'une des réponses acceptées
+function closestDistance(input:string, item:Item, dir:Direction): number {
+  const ans = normalize(input);
+  if (!ans) return Infinity;
+  const targets = dir==="id_fr"
+    ? [item.meaning,...(item.alt??[])].flatMap(t=>normalize(t).split(" / "))
+    : [normalize(item.word)];
+  return Math.min(...targets.map(t=>levenshtein(ans,t)));
+}
+
+// Faute de frappe probable : proche (1-2 caractères) mais pas exact
+function isTypo(input:string, item:Item, dir:Direction): boolean {
+  const d = closestDistance(input,item,dir);
+  return d>0 && d<=2;
 }
 
 function Heatmap({ data, streak, dark }:{ data:HeatDay[]; streak:number; dark:boolean }) {
@@ -332,7 +388,7 @@ function StatsPanel({ logs, uItems, palierCounts, dark }:{
   palierCounts:{l:string;icon:string;c:string;count:number}[];
   dark:boolean;
 }) {
-  const [tab, setTab] = useState<"activite"|"precision"|"repartition">("activite");
+  const [tab, setTab] = useState<"activite"|"precision"|"repartition"|"progression">("activite");
   const tc = dark?"#f1f5f9":"#1f2937";
   const sc = dark?"#94a3b8":"#6b7280";
   const bg2= dark?"#0f172a":"#f9fafb";
@@ -357,9 +413,23 @@ function StatsPanel({ logs, uItems, palierCounts, dark }:{
     };
   });
 
-  const TABS=[{id:"activite",label:"Activité"},{id:"precision",label:"Précision"},{id:"repartition",label:"Répartition"}];
+  const TABS=[{id:"activite",label:"Activité"},{id:"precision",label:"Précision"},
+    {id:"repartition",label:"Répartition"},{id:"progression",label:"Progression"}];
   const maxItems=Math.max(...byDay.map(d=>d.lessonItems+d.reviewItems),1);
   const totalLearned=uItems.filter(u=>u.learned).length;
+
+  // Items appris par semaine (8 dernières semaines), à partir des sessions de type "lesson"
+  const weeks8=Array.from({length:8},(_,i)=>{
+    const end=new Date(); end.setHours(23,59,59,999); end.setDate(end.getDate()-7*(7-i));
+    const start=new Date(end); start.setDate(start.getDate()-6); start.setHours(0,0,0,0);
+    return { start, end };
+  });
+  const byWeek=weeks8.map(({start,end})=>{
+    const learned=logs.filter(l=>l.session_type==="lesson")
+      .filter(l=>{ const d=new Date(l.created_at); return d>=start&&d<=end; })
+      .reduce((a,l)=>a+l.item_count,0);
+    return { label:`${start.getDate()}/${start.getMonth()+1}`, learned };
+  });
 
   return (
     <div style={{ ...card(dark), padding:"24px 28px" }}>
@@ -484,17 +554,95 @@ function StatsPanel({ logs, uItems, palierCounts, dark }:{
           </div>
         </div>
       )}
+
+      {tab==="progression"&&(()=>{
+        const width=560, height=180, padL=14, padR=14, padT=24, padB=28;
+        const plotW=width-padL-padR, plotH=height-padT-padB;
+        const maxVal=Math.max(...byWeek.map(w=>w.learned),1);
+        const stepX=byWeek.length>1?plotW/(byWeek.length-1):0;
+        const points=byWeek.map((w,i)=>({
+          x:padL+stepX*i,
+          y:padT+plotH-(w.learned/maxVal)*plotH,
+          ...w,
+        }));
+        const pathD=points.map((p,i)=>`${i===0?"M":"L"}${p.x},${p.y}`).join(" ");
+        const areaD=`${pathD} L${points[points.length-1].x},${padT+plotH} L${points[0].x},${padT+plotH} Z`;
+        const total8w=byWeek.reduce((a,w)=>a+w.learned,0);
+        return (
+          <div>
+            <svg viewBox={`0 0 ${width} ${height}`} style={{ width:"100%", height:"auto", display:"block" }}>
+              {[0,0.5,1].map(f=>(
+                <line key={f} x1={padL} x2={width-padR} y1={padT+plotH*(1-f)} y2={padT+plotH*(1-f)}
+                  stroke={dark?"#334155":"#e5e7eb"} strokeWidth={1}/>
+              ))}
+              <path d={areaD} fill="#3b82f6" opacity={0.12}/>
+              <path d={pathD} fill="none" stroke="#3b82f6" strokeWidth={2.5}/>
+              {points.map((p,i)=>(
+                <g key={i}>
+                  <circle cx={p.x} cy={p.y} r={4} fill="#3b82f6"/>
+                  {p.learned>0&&<text x={p.x} y={p.y-10} fontSize={11} fill={tc} textAnchor="middle" fontWeight={700}>{p.learned}</text>}
+                  <text x={p.x} y={height-8} fontSize={10} fill={sc} textAnchor="middle">{p.label}</text>
+                </g>
+              ))}
+            </svg>
+            <div style={{ display:"flex", gap:12, marginTop:20 }}>
+              {[
+                {l:"Items appris (8 sem.)", n:total8w,                                     c:"#3b82f6"},
+                {l:"Moyenne / semaine",     n:Math.round(total8w/byWeek.length*10)/10,      c:tc},
+              ].map(({l,n,c})=>(
+                <div key={l} style={{ flex:1, background:bg2, borderRadius:12, padding:"14px 16px" }}>
+                  <div style={{ fontSize:24, fontWeight:800, color:c }}>{n}</div>
+                  <div style={{ fontSize:12, color:sc, marginTop:4 }}>{l}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
 
 // ─── LEVEL DETAIL ─────────────────────────────────────────────────────────────
-function LevelDetail({ level, items, uItems, onBack, dark }:{
+function LevelDetail({ level, items, uItems, onBack, dark, onUpdateItem }:{
   level:number; items:Item[]; uItems:UItem[]; onBack:()=>void; dark:boolean;
+  onUpdateItem:(item:Item)=>void;
 }) {
   const lvItems=items.filter(i=>i.level===level);
   const tc=dark?"#f1f5f9":"#1f2937";
   const sc=dark?"#94a3b8":"#6b7280";
+  const [editingId, setEditingId] = useState<number|null>(null);
+  const [editForm, setEditForm]   = useState({ word:"", reading:"", meaning:"", alt:"", hint:"" });
+  const [saving, setSaving]       = useState(false);
+
+  function startEdit(item:Item) {
+    setEditingId(item.id);
+    setEditForm({ word:item.word, reading:item.reading, meaning:item.meaning,
+      alt:(item.alt??[]).join(", "), hint:item.hint??"" });
+  }
+
+  async function saveEdit(item:Item) {
+    setSaving(true);
+    const updated:Item = {
+      ...item,
+      word:editForm.word.trim(), reading:editForm.reading.trim(), meaning:editForm.meaning.trim(),
+      alt:editForm.alt?editForm.alt.split(",").map(s=>s.trim()).filter(Boolean):[],
+      hint:editForm.hint.trim(),
+    };
+    const { error } = await supabase.from("items").update({
+      word:updated.word, reading:updated.reading, meaning:updated.meaning,
+      alt:updated.alt, hint:updated.hint,
+    }).eq("id", item.id);
+    setSaving(false);
+    if (!error) { onUpdateItem(updated); setEditingId(null); }
+  }
+
+  const editInputStyle: React.CSSProperties = {
+    width:"100%", boxSizing:"border-box", padding:"9px 12px", fontSize:14,
+    borderRadius:8, border:`1.5px solid ${dark?"#334155":"#e5e7eb"}`,
+    outline:"none", fontFamily:"inherit", background:dark?"#0f172a":"#fff", color:tc, marginBottom:7,
+  };
+
   return (
     <div style={{ maxWidth:900, margin:"0 auto", padding:"28px 28px 60px" }}>
       <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:24 }}>
@@ -511,39 +659,71 @@ function LevelDetail({ level, items, uItems, onBack, dark }:{
           const stage=u?SRS_STAGES[u.stage]:null;
           const learned=u?.learned??false;
           const isNew=!learned;
+          const isEditing=editingId===item.id;
           return (
             <div key={item.id} style={{
               ...card(dark), padding:"14px 18px",
-              opacity:isNew?0.45:1,
-              background:isNew?(dark?"#0f172a":"#f9fafb"):(dark?"#1e293b":"#fff"),
-              borderColor:isNew?(dark?"#1e293b":"#f3f4f6"):learned&&stage?stage.color+"33":(dark?"#334155":"#e5e7eb"),
-              borderWidth:learned?1.5:1, transition:"all .2s",
+              opacity:isNew&&!isEditing?0.45:1,
+              background:isEditing?(dark?"#1e293b":"#fff"):isNew?(dark?"#0f172a":"#f9fafb"):(dark?"#1e293b":"#fff"),
+              borderColor:isEditing?"#3b82f6":isNew?(dark?"#1e293b":"#f3f4f6"):learned&&stage?stage.color+"33":(dark?"#334155":"#e5e7eb"),
+              borderWidth:isEditing||learned?1.5:1, transition:"all .2s",
             }}>
-              <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:6 }}>
-                <div style={{ flex:1 }}>
-                  <span style={{ fontWeight:800, fontSize:17, color:isNew?sc:tc }}>{item.word}</span>
-                  <span style={{ color:sc, fontSize:13, marginLeft:10 }}>/{item.reading}/</span>
+              {isEditing?(
+                <div>
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                    <input value={editForm.word} placeholder="Mot indonésien"
+                      onChange={e=>setEditForm(f=>({...f,word:e.target.value}))} style={editInputStyle}/>
+                    <input value={editForm.reading} placeholder="Lecture"
+                      onChange={e=>setEditForm(f=>({...f,reading:e.target.value}))} style={editInputStyle}/>
+                  </div>
+                  <input value={editForm.meaning} placeholder="Sens en français"
+                    onChange={e=>setEditForm(f=>({...f,meaning:e.target.value}))} style={editInputStyle}/>
+                  <input value={editForm.alt} placeholder="Sens alternatifs (séparés par des virgules)"
+                    onChange={e=>setEditForm(f=>({...f,alt:e.target.value}))} style={editInputStyle}/>
+                  <input value={editForm.hint} placeholder="Astuce mnémotechnique"
+                    onChange={e=>setEditForm(f=>({...f,hint:e.target.value}))} style={{ ...editInputStyle, marginBottom:10 }}/>
+                  <div style={{ display:"flex", gap:8 }}>
+                    <button onClick={()=>saveEdit(item)} disabled={saving||!editForm.word||!editForm.meaning}
+                      style={{ ...btn("#16a34a",saving||!editForm.word||!editForm.meaning,dark), width:"auto", padding:"9px 20px", fontSize:13 }}>
+                      {saving?"…":"✓ Enregistrer"}
+                    </button>
+                    <button onClick={()=>setEditingId(null)}
+                      style={{ ...btn(dark?"#334155":"#9ca3af",false,dark), width:"auto", padding:"9px 20px", fontSize:13 }}>
+                      Annuler
+                    </button>
+                  </div>
                 </div>
-                <Badge type={item.type} />
-              </div>
-              <div style={{ color:isNew?sc:(dark?"#cbd5e1":"#374151"), fontSize:15, marginBottom:learned?8:0 }}>
-                {isNew?"———":item.meaning}
-              </div>
-              {learned&&stage&&(
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                  <span style={{ background:stage.bg, color:stage.color, padding:"3px 12px", borderRadius:99, fontSize:13, fontWeight:600 }}>
-                    {stage.icon} {stage.name}
-                  </span>
-                  {u&&(
-                    <div style={{ display:"flex", gap:14, fontSize:13 }}>
-                      <span style={{ color:"#16a34a", fontWeight:700 }}>✓ {u.correct_count}</span>
-                      <span style={{ color:"#dc2626", fontWeight:700 }}>✗ {u.wrong_count}</span>
-                      {u.correct_count+u.wrong_count>0&&(
-                        <span style={{ color:sc }}>{Math.round(u.correct_count/(u.correct_count+u.wrong_count)*100)}%</span>
+              ):(
+                <>
+                  <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:6 }}>
+                    <div style={{ flex:1, cursor:"pointer" }} onClick={()=>startEdit(item)} title="Cliquer pour modifier ce mot">
+                      <span style={{ fontWeight:800, fontSize:17, color:isNew?sc:tc }}>{item.word}</span>
+                      <span style={{ color:sc, fontSize:13, marginLeft:10 }}>/{item.reading}/</span>
+                      <span style={{ color:sc, fontSize:12, marginLeft:8, opacity:.6 }}>✏️</span>
+                    </div>
+                    <Badge type={item.type} />
+                  </div>
+                  <div style={{ color:isNew?sc:(dark?"#cbd5e1":"#374151"), fontSize:15, marginBottom:learned?8:0, cursor:"pointer" }}
+                    onClick={()=>startEdit(item)}>
+                    {isNew?"———":item.meaning}
+                  </div>
+                  {learned&&stage&&(
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                      <span style={{ background:stage.bg, color:stage.color, padding:"3px 12px", borderRadius:99, fontSize:13, fontWeight:600 }}>
+                        {stage.icon} {stage.name}
+                      </span>
+                      {u&&(
+                        <div style={{ display:"flex", gap:14, fontSize:13 }}>
+                          <span style={{ color:"#16a34a", fontWeight:700 }}>✓ {u.correct_count}</span>
+                          <span style={{ color:"#dc2626", fontWeight:700 }}>✗ {u.wrong_count}</span>
+                          {u.correct_count+u.wrong_count>0&&(
+                            <span style={{ color:sc }}>{Math.round(u.correct_count/(u.correct_count+u.wrong_count)*100)}%</span>
+                          )}
+                        </div>
                       )}
                     </div>
                   )}
-                </div>
+                </>
               )}
             </div>
           );
@@ -554,8 +734,34 @@ function LevelDetail({ level, items, uItems, onBack, dark }:{
 }
 
 // ─── PROFILE PAGE ─────────────────────────────────────────────────────────────
-function ProfilePage({ prefs, onSave, onBack, dark }:{
+function exportProgressCSV(items:Item[], uItems:UItem[]) {
+  const header=["level","type","word","reading","meaning","alt","stage","palier","correct_count","wrong_count","learned","next_review"];
+  const esc=(v:unknown)=>`"${String(v??"").replace(/"/g,'""')}"`;
+  const rows=items
+    .slice()
+    .sort((a,b)=>a.level-b.level)
+    .map(it=>{
+      const u=uItems.find(x=>x.item_id===it.id);
+      const stageInfo=u?SRS_STAGES[u.stage]:null;
+      return [
+        it.level, it.type, it.word, it.reading, it.meaning, (it.alt??[]).join("|"),
+        u?.stage??"", stageInfo?.name??"", u?.correct_count??0, u?.wrong_count??0,
+        u?.learned?"oui":"non", u?.next_review??"",
+      ].map(esc).join(",");
+    });
+  const csv=[header.map(esc).join(","), ...rows].join("\n");
+  const blob=new Blob(["﻿"+csv], { type:"text/csv;charset=utf-8;" });
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download=`bahasa-srs-progression-${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function ProfilePage({ prefs, onSave, onBack, dark, items, uItems }:{
   prefs:UserPrefs; onSave:(p:UserPrefs)=>void; onBack:()=>void; dark:boolean;
+  items:Item[]; uItems:UItem[];
 }) {
   const [frId, setFrId]   = useState(prefs.fr_id_enabled);
   const [goal, setGoal]   = useState(prefs.daily_goal);
@@ -617,6 +823,18 @@ function ProfilePage({ prefs, onSave, onBack, dark }:{
           <div style={{ fontSize:12, color:sc, marginTop:8 }}>
             Le mode sombre se toggle depuis le bouton en haut du dashboard.
           </div>
+        </div>
+
+        {/* Export CSV */}
+        <div style={{ ...card(dark), padding:"20px 24px" }}>
+          <div style={{ fontSize:16, fontWeight:700, color:tc }}>Export de la progression</div>
+          <div style={{ fontSize:13, color:sc, marginTop:4, marginBottom:14 }}>
+            Télécharge un fichier CSV avec tous tes mots, leur palier SRS et tes stats (✓/✗) par item.
+          </div>
+          <button onClick={()=>exportProgressCSV(items,uItems)}
+            style={{ ...btn("#3b82f6",false,dark), width:"auto", padding:"10px 20px", fontSize:14 }}>
+            ⬇ Exporter en CSV
+          </button>
         </div>
 
         <button onClick={()=>onSave({fr_id_enabled:frId, daily_goal:goal})}
@@ -885,6 +1103,20 @@ function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson
   const todayItems=todayLogs.reduce((a,l)=>a+l.item_count,0);
   const goalPct=Math.min(Math.round(todayItems/prefs.daily_goal*100),100);
 
+  // Raccourcis clavier globaux : L = leçons, R = révisions
+  useEffect(()=>{
+    function handleKey(e:KeyboardEvent) {
+      if (e.ctrlKey||e.metaKey||e.altKey) return;
+      const target=e.target as HTMLElement|null;
+      if (target&&["INPUT","TEXTAREA","SELECT"].includes(target.tagName)) return;
+      const k=e.key.toLowerCase();
+      if (k==="l"&&lessonCount>0) onLesson();
+      else if (k==="r"&&dueCount>0) onReview();
+    }
+    window.addEventListener("keydown",handleKey);
+    return ()=>window.removeEventListener("keydown",handleKey);
+  },[lessonCount,dueCount,onLesson,onReview]);
+
   return (
     <div style={{ maxWidth:1100, margin:"0 auto", padding:"32px 32px 80px" }}>
       {/* Header */}
@@ -914,7 +1146,7 @@ function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson
       </div>
 
       {/* Boutons */}
-      <div style={{ display:"flex", gap:14, marginBottom:28 }}>
+      <div style={{ display:"flex", gap:14, marginBottom:6 }}>
         <button onClick={onLesson} disabled={lessonCount===0} style={{ ...btn("#e06b8b",lessonCount===0,dark), flex:1 }}>
           📚 Leçons ({lessonCount})
         </button>
@@ -926,6 +1158,9 @@ function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson
             🔥 Erreurs récentes ({errorCount})
           </button>
         )}
+      </div>
+      <div style={{ fontSize:12, color:sc, marginBottom:22 }}>
+        Raccourcis clavier : <b>L</b> leçons · <b>R</b> révisions
       </div>
 
       {/* Objectif journalier */}
@@ -1035,17 +1270,35 @@ function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson
 }
 
 // ─── QUIZ CARD ────────────────────────────────────────────────────────────────
-function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, showHintBtn, dark }:{
+function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, showHintBtn, dark, currentStage }:{
   item:Item; dir:Direction; questionNum:number; totalQuestions:number;
   onResult:(correct:boolean)=>void; onQuit:()=>void;
-  showHintBtn:boolean; dark:boolean;
+  showHintBtn:boolean; dark:boolean; currentStage:number;
 }) {
   const [input, setInput]       = useState("");
   const [result, setResult]     = useState<null|"correct"|"wrong">(null);
   const [hintShown, setHint]    = useState(false);
+  const [shakeCount, setShakeCount] = useState(0);
+  const [flashing, setFlashing]     = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const flashTimeout = useRef<ReturnType<typeof setTimeout>|null>(null);
 
-  useEffect(()=>{ setInput(""); setResult(null); setHint(false); setTimeout(()=>inputRef.current?.focus(),50); },[item.id,dir]);
+  useEffect(()=>{ setInput(""); setResult(null); setHint(false); setShakeCount(0); setFlashing(false); setTimeout(()=>inputRef.current?.focus(),50); },[item.id,dir]);
+
+  // Rejoue l'animation de secousse à chaque faute de frappe détectée (même répétée)
+  useEffect(()=>{
+    if (shakeCount===0) return;
+    setFlashing(true);
+    const el=inputRef.current;
+    if (el) {
+      el.style.animation="none";
+      void el.offsetWidth; // force le reflow pour pouvoir rejouer l'animation
+      el.style.animation="bahasa-shake .4s";
+    }
+    if (flashTimeout.current) clearTimeout(flashTimeout.current);
+    flashTimeout.current=setTimeout(()=>setFlashing(false),500);
+    return ()=>{ if(flashTimeout.current) clearTimeout(flashTimeout.current); };
+  },[shakeCount]);
 
   // Swipe support
   const touchStart = useRef<number|null>(null);
@@ -1060,10 +1313,16 @@ function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, sh
   const accentBg=result==="correct"?"#16a34a":result==="wrong"?"#dc2626":DIR_CONFIG[dir].bg;
   const displayed=dir==="id_fr"?item.word:item.meaning;
   const expected =dir==="id_fr"?item.meaning:item.word;
+  const newStage =result?calcNewStage(currentStage,result==="correct"):null;
 
   function check() {
     if (result) { onResult(result==="correct"); return; }
     const ok=checkAnswer(input,item,dir);
+    if (!ok && isTypo(input,item,dir)) {
+      // Faute de frappe probable : on secoue et on laisse l'utilisateur corriger, sans valider
+      setShakeCount(c=>c+1);
+      return;
+    }
     setResult(ok?"correct":"wrong");
     // Son
     try {
@@ -1108,15 +1367,24 @@ function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, sh
         </div>
       </div>
       <div style={{ padding:"0 8px" }}>
+        <style>{`@keyframes bahasa-shake{
+          10%,90%{transform:translateX(-1px)}
+          20%,80%{transform:translateX(2px)}
+          30%,50%,70%{transform:translateX(-4px)}
+          40%,60%{transform:translateX(4px)}
+        }`}</style>
         <input ref={inputRef} autoFocus value={input}
           onChange={e=>{ if(!result) setInput(e.target.value); }}
           onKeyDown={e=>e.key==="Enter"&&check()}
           placeholder={dir==="id_fr"?"Sens en français…":"Mot en indonésien…"}
           style={{ width:"100%", boxSizing:"border-box", padding:"15px 16px", fontSize:17,
-            border:`2px solid ${result?accentBg:(dark?"#334155":"#e5e7eb")}`,
+            border:`2px solid ${result?accentBg:(flashing?"#f59e0b":(dark?"#334155":"#e5e7eb"))}`,
             borderRadius:14, outline:"none", marginBottom:12, fontFamily:"inherit",
             background:result?(result==="correct"?"#dcfce7":"#fee2e2"):(dark?"#1e293b":"#fff"),
-            color:dark&&!result?"#f1f5f9":"#1f2937" }}/>
+            color:dark&&!result?"#f1f5f9":"#1f2937" }}
+          autoComplete="off"/>
+        {flashing&&!result&&<div style={{ textAlign:"center", marginTop:-6, marginBottom:10,
+          fontSize:13, color:"#d97706" }}>Presque ! Vérifie l'orthographe ✏️</div>}
 
         {/* Bouton indice */}
         {showHintBtn&&!result&&item.hint&&!hintShown&&(
@@ -1149,6 +1417,23 @@ function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, sh
             )}
             {result==="correct"&&item.hint&&
               <div style={{ color:"#6b7280", fontSize:14, marginTop:4 }}>💡 {item.hint}</div>}
+          </div>
+        )}
+
+        {result&&newStage!==null&&(
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, marginBottom:12 }}>
+            <span style={{ background:SRS_STAGES[currentStage].bg, color:SRS_STAGES[currentStage].color,
+              padding:"4px 12px", borderRadius:99, fontSize:13, fontWeight:600 }}>
+              {SRS_STAGES[currentStage].icon} {SRS_STAGES[currentStage].name}
+            </span>
+            <span style={{ fontSize:16, fontWeight:800,
+              color:newStage>currentStage?"#16a34a":newStage<currentStage?"#dc2626":(dark?"#64748b":"#9ca3af") }}>
+              {newStage>currentStage?"↑":newStage<currentStage?"↓":"="}
+            </span>
+            <span style={{ background:SRS_STAGES[newStage].bg, color:SRS_STAGES[newStage].color,
+              padding:"4px 12px", borderRadius:99, fontSize:13, fontWeight:700 }}>
+              {SRS_STAGES[newStage].icon} {SRS_STAGES[newStage].name}
+            </span>
           </div>
         )}
         <button onClick={check} style={btn(accentBg,false,dark)}>
@@ -1194,6 +1479,20 @@ function LessonView({ items, prefs, onComplete, dark }:{
     window.addEventListener("keydown",handleKey);
     return ()=>window.removeEventListener("keydown",handleKey);
   },[phase,learnIdx,BATCH]);
+
+  useEffect(()=>{
+    if (qIdx<queue.length) return;
+    const allDone=batch.every(item=>answered.has(item.id));
+    if (!allDone) {
+      const missing=batch.filter(item=>!answered.has(item.id)).flatMap(item=>[
+        {item,dir:"id_fr" as Direction},
+        ...(prefs.fr_id_enabled?[{item,dir:"fr_id" as Direction}]:[]),
+      ]);
+      setQueue(q=>[...q,...missing]);
+    } else {
+      onComplete(results);
+    }
+  },[qIdx, queue.length]);
 
   if (phase==="learn") return (
     <div style={{ maxWidth:560, margin:"0 auto", padding:"0 14px" }}>
@@ -1241,24 +1540,13 @@ function LessonView({ items, prefs, onComplete, dark }:{
     </div>
   );
 
-  if (qIdx>=queue.length) {
-    const allDone=batch.every(item=>answered.has(item.id));
-    if (!allDone) {
-      const missing=batch.filter(item=>!answered.has(item.id)).flatMap(item=>[
-        {item,dir:"id_fr" as Direction},
-        ...(prefs.fr_id_enabled?[{item,dir:"fr_id" as Direction}]:[]),
-      ]);
-      setQueue(q=>[...q,...missing]);
-      return <div style={{ display:"flex",alignItems:"center",justifyContent:"center",height:"100vh" }}>🌀</div>;
-    }
-    onComplete(results);
-    return null;
-  }
 
+
+  if (qIdx>=queue.length) return <div style={{ display:"flex",alignItems:"center",justifyContent:"center",height:"100vh" }}>🌀</div>;
   const {item,dir}=queue[qIdx];
   return (
     <QuizCard item={item} dir={dir} questionNum={qIdx+1} totalQuestions={queue.length}
-      showHintBtn={true} dark={dark}
+      showHintBtn={true} dark={dark} currentStage={0}
       onQuit={()=>onComplete([])}
       onResult={correct=>{
         setResults(r=>[...r,{item_id:item.id,correct}]);
@@ -1269,77 +1557,124 @@ function LessonView({ items, prefs, onComplete, dark }:{
 }
 
 // ─── REVIEW VIEW ──────────────────────────────────────────────────────────────
+// Nombre de mots "en cours" au maximum en même temps pendant une session de révision
+// (façon WaniKani : on ne pioche pas tout le pool de mots dus d'un coup, on tire par lots).
+const REVIEW_BATCH = 10;
+
 function ReviewView({ dueItems, items, prefs, onComplete, dark, title }:{
   dueItems:UItem[]; items:Item[]; prefs:UserPrefs; onComplete:(r:QResult[])=>void; dark:boolean; title?:string;
 }) {
-  const [queue, setQueue]=useState<{item:Item;dir:Direction}[]>(()=>
-    dueItems.map(u=>items.find(i=>i.id===u.item_id)).filter(Boolean)
-      .sort(()=>Math.random()-.5)
-      .flatMap(item=>[
-        {item:item!,dir:"id_fr" as Direction},
-        ...(prefs.fr_id_enabled?[{item:item!,dir:"fr_id" as Direction}]:[]),
-      ])
-  );
+  // Ordre de pioche des mots dus, mélangé une seule fois au montage
+  const shuffledPool=useRef(dueItems.slice().sort(()=>Math.random()-.5)).current;
+
+  function buildEntries(pool:UItem[]): {item:Item;dir:Direction}[] {
+    return pool.flatMap(u=>{
+      const item=items.find(i=>i.id===u.item_id);
+      if (!item) return [];
+      return [
+        {item,dir:"id_fr" as Direction},
+        ...(prefs.fr_id_enabled?[{item,dir:"fr_id" as Direction}]:[]),
+      ];
+    }).sort(()=>Math.random()-.5);
+  }
+
+  const initialBatch=shuffledPool.slice(0,Math.min(REVIEW_BATCH,shuffledPool.length));
+  const [pulledCount, setPulledCount]=useState(initialBatch.length);
+  const [activeIds, setActiveIds]=useState<Set<number>>(()=>new Set(initialBatch.map(u=>u.item_id)));
+  const [queue, setQueue]=useState<{item:Item;dir:Direction}[]>(()=>buildEntries(initialBatch));
   const [qIdx, setQIdx]=useState(0);
   const [results, setResults]=useState<QResult[]>([]);
   const [answered, setAnswered]=useState<Set<string>>(new Set());
+  const [wrappingUp, setWrappingUp]=useState(false);
 
-  if (qIdx>=queue.length) {
-    const allDone=dueItems.every(u=>{
-      const item=items.find(i=>i.id===u.item_id);
-      if (!item) return true;
+  useEffect(()=>{
+    if (qIdx<queue.length) return;
+    // Les mots actuellement "en cours" ont-ils tous été répondus correctement dans toutes les directions ?
+    const activeItems=items.filter(i=>activeIds.has(i.id));
+    const allActiveDone=activeItems.every(item=>{
       if (!prefs.fr_id_enabled) return answered.has(`${item.id}_id_fr`);
       return answered.has(`${item.id}_id_fr`)&&answered.has(`${item.id}_fr_id`);
     });
-    if (!allDone) {
-      const missing=dueItems.flatMap(u=>{
-        const item=items.find(i=>i.id===u.item_id);
-        if (!item) return [];
+    if (!allActiveDone) {
+      // Filet de sécurité : rajoute les directions manquantes des mots déjà actifs (ne devrait
+      // normalement pas arriver, les erreurs sont rebouclées directement dans onResult)
+      const missing=activeItems.flatMap(item=>{
         const dirs:Direction[]=[];
         if (!answered.has(`${item.id}_id_fr`)) dirs.push("id_fr");
         if (prefs.fr_id_enabled&&!answered.has(`${item.id}_fr_id`)) dirs.push("fr_id");
         return dirs.map(dir=>({item,dir}));
-      }).sort(()=>Math.random()-.5);
-      setQueue(q=>[...q,...missing]);
-      return <div style={{ display:"flex",alignItems:"center",justifyContent:"center",height:"100vh" }}>🌀</div>;
+      });
+      if (missing.length) setQueue(q=>[...q,...missing]);
+      return;
+    }
+    // Le lot actif est terminé : si on ne "wrap up" pas et qu'il reste des mots dus, on pioche le lot suivant
+    if (!wrappingUp && pulledCount<shuffledPool.length) {
+      const nextBatch=shuffledPool.slice(pulledCount,pulledCount+REVIEW_BATCH);
+      setPulledCount(c=>c+nextBatch.length);
+      setActiveIds(new Set(nextBatch.map(u=>u.item_id)));
+      setQueue(q=>[...q,...buildEntries(nextBatch)]);
+    }
+    // Sinon : rien à piocher de plus, l'écran de fin de session s'affiche ci-dessous
+  },[qIdx, queue.length]);
+
+  if (qIdx>=queue.length && results.length===0) return <div style={{ display:"flex",alignItems:"center",justifyContent:"center",height:"100vh" }}>🌀</div>;
+    if (qIdx>=queue.length) {
+      const correct=results.filter(r=>r.correct).length;
+      const pct=results.length?Math.round(correct/results.length*100):0;
+      return (
+        <div style={{ maxWidth:520, margin:"0 auto", padding:"60px 16px", textAlign:"center" }}>
+          <div style={{ fontSize:64 }}>{pct>=80?"🎉":pct>=50?"💪":"😅"}</div>
+          {title&&<div style={{ fontSize:13, fontWeight:700, color:"#f97316", marginBottom:6 }}>{title}</div>}
+          <div style={{ fontSize:26, fontWeight:800, margin:"16px 0 8px", color:dark?"#f1f5f9":"#1f2937" }}>Session terminée !</div>
+          <div style={{ color:dark?"#94a3b8":"#6b7280", fontSize:16 }}>{correct}/{results.length} correctes ({pct}%)</div>
+          <div style={{ marginTop:24, ...card(dark), padding:"20px", textAlign:"left" }}>
+            {[
+              {l:"Correctes",   n:correct,               c:"#16a34a"},
+              {l:"Incorrectes", n:results.length-correct, c:"#dc2626"},
+              {l:"Précision",   n:pct+"%",               c:"#3b82f6"},
+            ].map(({l,n,c})=>(
+              <div key={l} style={{ display:"flex", justifyContent:"space-between",
+                padding:"10px 0", borderBottom:`1px solid ${dark?"#334155":"#f3f4f6"}` }}>
+                <span style={{ color:dark?"#94a3b8":"#6b7280", fontSize:15 }}>{l}</span>
+                <span style={{ fontWeight:800, color:c, fontSize:15 }}>{n}</span>
+              </div>
+            ))}
+          </div>
+          <button onClick={()=>onComplete(results)}
+            style={{ ...btn("#3b82f6",false,dark), marginTop:24, width:"auto", padding:"14px 48px" }}>
+            ← Retour
+          </button>
+        </div>
+      );
     }
 
-    const correct=results.filter(r=>r.correct).length;
-    const pct=results.length?Math.round(correct/results.length*100):0;
-    return (
-      <div style={{ maxWidth:520, margin:"0 auto", padding:"60px 16px", textAlign:"center" }}>
-        <div style={{ fontSize:64 }}>{pct>=80?"🎉":pct>=50?"💪":"😅"}</div>
-        {title&&<div style={{ fontSize:13, fontWeight:700, color:"#f97316", marginBottom:6 }}>{title}</div>}
-        <div style={{ fontSize:26, fontWeight:800, margin:"16px 0 8px", color:dark?"#f1f5f9":"#1f2937" }}>Session terminée !</div>
-        <div style={{ color:dark?"#94a3b8":"#6b7280", fontSize:16 }}>{correct}/{results.length} correctes ({pct}%)</div>
-        <div style={{ marginTop:24, ...card(dark), padding:"20px", textAlign:"left" }}>
-          {[
-            {l:"Correctes",   n:correct,               c:"#16a34a"},
-            {l:"Incorrectes", n:results.length-correct, c:"#dc2626"},
-            {l:"Précision",   n:pct+"%",               c:"#3b82f6"},
-          ].map(({l,n,c})=>(
-            <div key={l} style={{ display:"flex", justifyContent:"space-between",
-              padding:"10px 0", borderBottom:`1px solid ${dark?"#334155":"#f3f4f6"}` }}>
-              <span style={{ color:dark?"#94a3b8":"#6b7280", fontSize:15 }}>{l}</span>
-              <span style={{ fontWeight:800, color:c, fontSize:15 }}>{n}</span>
-            </div>
-          ))}
-        </div>
-        <button onClick={()=>onComplete(results)}
-          style={{ ...btn("#3b82f6",false,dark), marginTop:24, width:"auto", padding:"14px 48px" }}>
-          ← Retour
-        </button>
-      </div>
-    );
-  }
-
   const {item,dir}=queue[qIdx];
+  const remainingInPool=shuffledPool.length-pulledCount;
   return (
     <>
-      {title&&<div style={{ maxWidth:560, margin:"10px auto 0", padding:"0 14px",
-        textAlign:"center", fontSize:13, fontWeight:700, color:"#f97316" }}>{title}</div>}
+      {(title||remainingInPool>0)&&(
+        <div style={{ maxWidth:560, margin:"10px auto 0", padding:"0 14px",
+          display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+          <div>
+            {title&&<div style={{ fontSize:13, fontWeight:700, color:"#f97316" }}>{title}</div>}
+            {remainingInPool>0&&<div style={{ fontSize:12, color:dark?"#64748b":"#9ca3af", marginTop:2 }}>
+              {activeIds.size} mot{activeIds.size>1?"s":""} en cours · {remainingInPool} en attente
+            </div>}
+          </div>
+          {remainingInPool>0&&(
+            wrappingUp
+              ? <span style={{ fontSize:12, fontWeight:700, color:"#f59e0b", whiteSpace:"nowrap" }}>🏁 Finalisation…</span>
+              : <button onClick={()=>setWrappingUp(true)}
+                  style={{ background:"none", border:"1.5px solid #f59e0b", color:"#f59e0b",
+                    borderRadius:10, padding:"6px 14px", fontSize:12, fontWeight:700, cursor:"pointer",
+                    fontFamily:"inherit", whiteSpace:"nowrap" }}>
+                  🏁 Terminer la session
+                </button>
+          )}
+        </div>
+      )}
       <QuizCard item={item} dir={dir} questionNum={qIdx+1} totalQuestions={queue.length}
-        showHintBtn={true} dark={dark}
+        showHintBtn={true} dark={dark} currentStage={dueItems.find(u=>u.item_id===item.id)?.stage??0}
         onQuit={()=>onComplete(results)}
         onResult={correct=>{
           setResults(r=>[...r,{item_id:item.id,correct}]);
@@ -1347,6 +1682,34 @@ function ReviewView({ dueItems, items, prefs, onComplete, dark, title }:{
           else { setQueue(q=>[...q,{item,dir}]); setQIdx(i=>i+1); }
         }}/>
     </>
+  );
+}
+
+// ─── CONFETTIS (niveau terminé) ────────────────────────────────────────────────
+function Confetti({ onDone }:{ onDone:()=>void }) {
+  useEffect(()=>{ const t=setTimeout(onDone,3400); return ()=>clearTimeout(t); },[onDone]);
+  const colors=["#e06b8b","#9b59b6","#3b82f6","#0ea5e9","#16a34a","#f59e0b"];
+  const pieces=useRef(Array.from({length:70},(_,i)=>({
+    left:Math.random()*100,
+    delay:Math.random()*0.5,
+    duration:2.4+Math.random()*1.4,
+    color:colors[i%colors.length],
+    size:6+Math.random()*6,
+  }))).current;
+  return (
+    <div style={{ position:"fixed", inset:0, pointerEvents:"none", overflow:"hidden", zIndex:9999 }}>
+      <style>{`@keyframes bahasa-confetti-fall{
+        0%{ transform:translateY(-10vh) rotate(0deg); opacity:1; }
+        100%{ transform:translateY(110vh) rotate(640deg); opacity:.85; }
+      }`}</style>
+      {pieces.map((p,i)=>(
+        <div key={i} style={{
+          position:"absolute", top:0, left:`${p.left}%`,
+          width:p.size, height:p.size*0.4, background:p.color, borderRadius:2,
+          animation:`bahasa-confetti-fall ${p.duration}s ease-in ${p.delay}s forwards`,
+        }}/>
+      ))}
+    </div>
   );
 }
 
@@ -1429,8 +1792,11 @@ export default function App() {
   const [view, setView]           = useState<View>("dashboard");
   const [selectedLevel, setSelectedLevel] = useState<number|null>(null);
   const [dark, setDark]           = useState(()=>localStorage.getItem("bahasa_dark")==="1");
+  const [confettiLevel, setConfettiLevel] = useState<number|null>(null);
   const [prefs, setPrefs]         = useState<UserPrefs>(()=>{
-    try { return JSON.parse(localStorage.getItem(PREFS_KEY)||"{}") as UserPrefs; }
+    // Important : fusionner avec DEFAULT_PREFS, sinon un localStorage vide ({}) donne
+    // fr_id_enabled=undefined (donc désactivé) au lieu du true attendu par défaut.
+    try { return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREFS_KEY)||"{}") } as UserPrefs; }
     catch { return DEFAULT_PREFS; }
   });
 
@@ -1453,7 +1819,7 @@ export default function App() {
       supabase.from("items").select("*").order("level"),
       supabase.from("user_items").select("*").eq("user_id",uid),
       supabase.from("session_logs").select("*").eq("user_id",uid)
-        .gte("created_at",new Date(Date.now()-7*24*3600*1000).toISOString())
+        .gte("created_at",new Date(Date.now()-90*24*3600*1000).toISOString()) // 90j : 7j pour l'onglet Activité + historique pour le graphique de progression hebdo
         .order("created_at",{ascending:true}),
       supabase.rpc("get_heatmap_data",{p_user_id:uid}),
       supabase.rpc("get_user_streak",{p_user_id:uid}),
@@ -1461,6 +1827,7 @@ export default function App() {
     setItems(cat??[]); setUItems(prog??[]); setLogs(logData??[]);
     setHeatmap(heat??[]); setStreak(streakData??0);
     setLoading(false);
+    return prog??[];
   },[]);
 
   useEffect(()=>{ if(user) loadData(user.id); },[user,loadData]);
@@ -1476,6 +1843,7 @@ export default function App() {
     const deduped=Object.entries(byItem).map(([id,correct])=>({item_id:Number(id),correct}));
     const correct=results.filter(r=>r.correct).length;
     const wrong=results.filter(r=>!r.correct).length;
+    const prevUItems=uItems;
     await Promise.all([
       supabase.rpc("apply_review_results",{p_user_id:user.id,p_results:deduped}),
       supabase.from("session_logs").insert({
@@ -1483,7 +1851,15 @@ export default function App() {
         item_count:deduped.length,correct,wrong,
       }),
     ]);
-    await loadData(user.id);
+    const newUItems=await loadData(user.id);
+    // Niveau tout juste terminé ? -> confettis
+    const levels=Array.from(new Set(items.map(i=>i.level)));
+    const justCompleted=levels.find(lv=>
+      !isLevelComplete(lv,items,prevUItems) && isLevelComplete(lv,items,newUItems)
+    );
+    if (justCompleted!==undefined) {
+      setConfettiLevel(justCompleted);
+    }
     setSaving(false); setView("dashboard");
   }
 
@@ -1511,9 +1887,10 @@ export default function App() {
   const errorItems=uItems.filter(u=>u.learned&&u.last_wrong_at&&u.last_wrong_at>=errorCutoff);
 
   if (view==="level_detail"&&selectedLevel!==null)
-    return <LevelDetail level={selectedLevel} items={items} uItems={uItems} onBack={()=>setView("dashboard")} dark={dark}/>;
+    return <LevelDetail level={selectedLevel} items={items} uItems={uItems} onBack={()=>setView("dashboard")} dark={dark}
+      onUpdateItem={updated=>setItems(prev=>prev.map(i=>i.id===updated.id?updated:i))}/>;
   if (view==="profile")
-    return <ProfilePage prefs={prefs} onSave={savePrefs} onBack={()=>setView("dashboard")} dark={dark}/>;
+    return <ProfilePage prefs={prefs} onSave={savePrefs} onBack={()=>setView("dashboard")} dark={dark} items={items} uItems={uItems}/>;
   if (view==="admin")
     return <AdminPage onBack={()=>setView("dashboard")} dark={dark} userId={user.id}/>;
   if (view==="lesson")
@@ -1524,11 +1901,24 @@ export default function App() {
     return <ReviewView dueItems={errorItems} items={items} prefs={prefs} onComplete={r=>applyResults(r,"review")} dark={dark} title="🔥 Erreurs récentes"/>;
 
   return (
-    <Dashboard items={items} uItems={uItems} logs={logs} heatmap={heatmap} streak={streak}
-      prefs={prefs} dark={dark}
-      onLesson={()=>setView("lesson")} onReview={()=>setView("review")} onErrors={()=>setView("review_errors")}
-      onLogout={logout} onLevelClick={lv=>{setSelectedLevel(lv);setView("level_detail");}}
-      onProfile={()=>setView("profile")} onAdmin={()=>setView("admin")}
-      onToggleDark={()=>setDark(d=>!d)}/>
+    <>
+      <Dashboard items={items} uItems={uItems} logs={logs} heatmap={heatmap} streak={streak}
+        prefs={prefs} dark={dark}
+        onLesson={()=>setView("lesson")} onReview={()=>setView("review")} onErrors={()=>setView("review_errors")}
+        onLogout={logout} onLevelClick={lv=>{setSelectedLevel(lv);setView("level_detail");}}
+        onProfile={()=>setView("profile")} onAdmin={()=>setView("admin")}
+        onToggleDark={()=>setDark(d=>!d)}/>
+      {confettiLevel!==null&&(
+        <>
+          <Confetti onDone={()=>setConfettiLevel(null)}/>
+          <div style={{ position:"fixed", top:24, left:"50%", transform:"translateX(-50%)",
+            background:dark?"#1e293b":"#fff", border:"2px solid #f59e0b", borderRadius:16,
+            padding:"14px 28px", boxShadow:"0 8px 24px rgba(0,0,0,.18)", zIndex:10000,
+            fontWeight:800, fontSize:16, color:dark?"#f1f5f9":"#1f2937" }}>
+            🎉 Niveau {confettiLevel} terminé !
+          </div>
+        </>
+      )}
+    </>
   );
 }
