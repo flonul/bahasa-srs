@@ -1835,12 +1835,20 @@ export default function App() {
   async function applyResults(results:QResult[], sessionType:"lesson"|"review") {
     if (!user||!results.length) { setView("dashboard"); return; }
     setSaving(true);
-    const byItem:Record<number,boolean>={};
+    const byItem:Record<number,{correct:number;wrong:number}>={};
     results.forEach(({item_id,correct})=>{
-      if (byItem[item_id]===undefined) byItem[item_id]=correct;
-      else byItem[item_id]=byItem[item_id]&&correct;
+      if (!byItem[item_id]) byItem[item_id]={correct:0,wrong:0};
+      correct ? byItem[item_id].correct++ : byItem[item_id].wrong++;
     });
-    const deduped=Object.entries(byItem).map(([id,correct])=>({item_id:Number(id),correct}));
+
+  // Ne sauvegarde que les items entièrement validés dans les deux sens
+    const dirCount = prefs.fr_id_enabled ? 2 : 1;
+    const deduped = Object.entries(byItem)
+      .filter(([,{correct,wrong}]) => correct >= dirCount && wrong === 0)
+      .map(([id,{correct,wrong}]) => ({
+        item_id: Number(id),
+        correct: true,
+    }));
     const correct=results.filter(r=>r.correct).length;
     const wrong=results.filter(r=>!r.correct).length;
     const prevUItems=uItems;
