@@ -1270,8 +1270,8 @@ function Dashboard({ items, uItems, logs, heatmap, streak, prefs, dark, onLesson
 }
 
 // ─── QUIZ CARD ────────────────────────────────────────────────────────────────
-function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, showHintBtn, dark, currentStage }:{
-  item:Item; dir:Direction; questionNum:number; totalQuestions:number;
+function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, showHintBtn, dark, currentStage, totalCorrect=0 }:{
+  item:Item; dir:Direction; questionNum:number; totalQuestions:number; totalCorrect?:number;
   onResult:(correct:boolean)=>void; onQuit:()=>void;
   showHintBtn:boolean; dark:boolean; currentStage:number;
 }) {
@@ -1283,8 +1283,13 @@ function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, sh
   const inputRef = useRef<HTMLInputElement>(null);
   const flashTimeout = useRef<ReturnType<typeof setTimeout>|null>(null);
 
-  useEffect(()=>{ setInput(""); setResult(null); setHint(false); setShakeCount(0); setFlashing(false); setTimeout(()=>inputRef.current?.focus(),50); },[item.id,dir]);
-
+  const firstRender = useRef(true);
+  useEffect(()=>{
+    if (!firstRender.current) { setInput(""); setResult(null); setHint(false); }
+    firstRender.current=false;
+    setTimeout(()=>inputRef.current?.focus(),50);
+  },[item.id,dir]);
+  
   // Rejoue l'animation de secousse à chaque faute de frappe détectée (même répétée)
   useEffect(()=>{
     if (shakeCount===0) return;
@@ -1338,15 +1343,14 @@ function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, sh
   }
 
   return (
-    <div style={{ maxWidth:560, margin:"0 auto", padding:"0 14px" }}
+    <div style={{ width:"100%" }}
       onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
-      <div style={{ background:accentBg, borderRadius:"0 0 24px 24px",
-        padding:"20px 24px 30px", marginBottom:24, transition:"background .25s" }}>
+      <div style={{ background:accentBg,
+        padding:"20px 10% 40px", marginBottom:0, transition:"background .25s" }}>
         <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:16 }}>
           <button onClick={onQuit} style={{ background:"rgba(255,255,255,.2)", border:"none",
             cursor:"pointer", color:"#fff", borderRadius:8, padding:"5px 12px",
             fontSize:14, fontFamily:"inherit" }}>← Quitter</button>
-          <span style={{ color:"rgba(255,255,255,.8)", fontSize:13 }}>{questionNum}/{totalQuestions}</span>
           <div style={{ flex:1, height:5, background:"rgba(255,255,255,.3)", borderRadius:99, overflow:"hidden" }}>
             <div style={{ width:`${(questionNum-1)/totalQuestions*100}%`, height:"100%",
               background:"rgba(255,255,255,.85)", transition:"width .3s" }}/>
@@ -1355,10 +1359,19 @@ function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, sh
             padding:"2px 8px", borderRadius:99, fontSize:11, fontWeight:600 }}>
             {DIR_CONFIG[dir].label}
           </span>
+          {/* Stats WaniKani style */}
+          <div style={{ display:"flex", gap:16, background:"rgba(0,0,0,.2)",
+            borderRadius:10, padding:"6px 14px", fontSize:13 }}>
+            <span style={{ color:"#fff", fontWeight:700 }}>
+              👍 {totalCorrect !== undefined ? Math.round(totalCorrect/(questionNum-1)*100)||0 : 0}%
+            </span>
+            <span style={{ color:"#86efac", fontWeight:700 }}>✓ {totalCorrect||0}</span>
+            <span style={{ color:"#fca5a5", fontWeight:700 }}>✗ {questionNum-1-(totalCorrect||0)}</span>
+          </div>
         </div>
         <div style={{ textAlign:"center" }}>
           <Badge type={item.type}/>
-          <div style={{ fontSize:displayed.length>15?28:56, fontWeight:800, color:"#fff",
+          <div style={{ fontSize:displayed.length>15?40:80, fontWeight:800, color:"#fff",
             margin:"14px 0 8px", lineHeight:1.1 }}>{displayed}</div>
           {!result&&<div style={{ color:"rgba(255,255,255,.75)", fontSize:15 }}>{DIR_CONFIG[dir].prompt}</div>}
           {result &&<div style={{ color:"rgba(255,255,255,.85)", fontSize:15 }}>
@@ -1366,7 +1379,7 @@ function QuizCard({ item, dir, questionNum, totalQuestions, onResult, onQuit, sh
           </div>}
         </div>
       </div>
-      <div style={{ padding:"0 8px" }}>
+      <div style={{ padding:"0 0px" }}>
         <style>{`@keyframes bahasa-shake{
           10%,90%{transform:translateX(-1px)}
           20%,80%{transform:translateX(2px)}
@@ -1546,7 +1559,7 @@ function LessonView({ items, prefs, onComplete, dark }:{
   const {item,dir}=queue[qIdx];
   return (
     <QuizCard item={item} dir={dir} questionNum={qIdx+1} totalQuestions={queue.length}
-      showHintBtn={true} dark={dark} currentStage={0}
+      showHintBtn={true} dark={dark} currentStage={0} totalCorrect={results.filter(r=>r.correct).length}
       onQuit={()=>onComplete([])}
       onResult={correct=>{
         setResults(r=>[...r,{item_id:item.id,correct}]);
@@ -1673,8 +1686,8 @@ function ReviewView({ dueItems, items, prefs, onComplete, dark, title }:{
           )}
         </div>
       )}
-      <QuizCard item={item} dir={dir} questionNum={qIdx+1} totalQuestions={queue.length}
-        showHintBtn={true} dark={dark} currentStage={dueItems.find(u=>u.item_id===item.id)?.stage??0}
+      <QuizCard item={item} dir={dir} questionNum={qIdx+1} totalQuestions={queue.length} 
+        showHintBtn={true} dark={dark} currentStage={dueItems.find(u=>u.item_id===item.id)?.stage??0} totalCorrect={results.filter(r=>r.correct).length}
         onQuit={()=>onComplete(results)}
         onResult={correct=>{
           setResults(r=>[...r,{item_id:item.id,correct}]);
